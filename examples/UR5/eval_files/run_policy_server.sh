@@ -5,7 +5,7 @@ STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 star_vla_python="${star_vla_python:-python}"
 port="${port:-6678}"
 gpu_id="${gpu_id:-0}"
-your_ckpt="${your_ckpt:-$HOME/vla_workspace/starVLA/playground/Checkpoints/ur5_dataset400_action_v2/checkpoints/steps_15000_pytorch_model.pt}"
+your_ckpt="${your_ckpt:-$HOME/vla_workspace/starVLA/playground/Checkpoints/ur5_front_rgb_pick_600_geometry_v4g/checkpoints/steps_10000_pytorch_model.pt}"
 USE_BF16="${USE_BF16:-1}"
 
 cd "${STARVLA_DIR}"

@@ -282,7 +282,69 @@ class TrainerUtils:
                     prefix = path + "."
                     sub_state_dict = {k[len(prefix) :]: v for k, v in checkpoint.items() if k.startswith(prefix)}
                     if sub_state_dict:
-                        module.load_state_dict(sub_state_dict, strict=True)
+                        load_result = module.load_state_dict(
+                            sub_state_dict,
+                            strict=False,
+                        )
+
+                        allowed_missing_prefixes = (
+                            # V3 modules
+                            "visual_projector.",
+                            "vision_state_fusion.",
+                            "geometry_head.",
+
+                            # V4A modules
+                            "visual_kv_projector.",
+                            "geometry_cross_attn.",
+                            "geometry_attn_norm.",
+                            "geometry_ffn.",
+                            "geometry_ffn_norm.",
+
+                            # V4B modules
+                            "geometry_state_fusion.",
+                            "geometry_state_fusion_norm.",
+
+                            # V4D modules
+                            "rel_target_action_projector.",
+                            "action_context_fusion.",
+                            "action_context_norm.",
+
+                            # V4E modules
+                            "control_head.",
+
+                            # V4G-A modules
+                            "eef_xyz_projector.",
+                            "metric_geometry_fusion.",
+                            "metric_geometry_fusion_norm.",
+
+                            # V7 explicit geometry modules
+                            "explicit_geometry_encoder.",
+                            "hybrid_geometry_fusion.",
+                            "hybrid_geometry_fusion_norm.",
+                        )
+
+                        unexpected_missing = [
+                            key
+                            for key in load_result.missing_keys
+                            if not key.startswith(allowed_missing_prefixes)
+                        ]
+
+                        if unexpected_missing:
+                            raise RuntimeError(
+                                "Unexpected missing keys when loading pretrained checkpoint:\n"
+                                + "\n".join(unexpected_missing)
+                            )
+
+                        if load_result.unexpected_keys:
+                            print(
+                                "[WARNING] Unexpected checkpoint keys:",
+                                load_result.unexpected_keys,
+                            )
+
+                        print(
+                            "[Pretrained Load] New modules initialized from scratch:",
+                            load_result.missing_keys,
+                        )
                         if dist.get_rank() == 0:
                             print(f"✅ parameters loaded to module '{path}'")
                         loaded_modules.append(path)

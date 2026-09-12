@@ -38,8 +38,21 @@ from starVLA.model.framework.share_tools import apply_config_compat
 from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
 from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_param_lr_groups, setup_optimizer_and_scheduler, normalize_dotlist_args
 
+gradient_accumulation_steps = int(
+    os.environ.get(
+        "STARVLA_GRAD_ACC_STEPS",
+        "8",
+    )
+)
+
 deepspeed_plugin = DeepSpeedPlugin()
-accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
+
+accelerator = Accelerator(
+    deepspeed_plugin=deepspeed_plugin,
+    gradient_accumulation_steps=(
+        gradient_accumulation_steps
+    ),
+)
 accelerator.print(accelerator.state)
 
 # Sane Defaults
@@ -74,6 +87,52 @@ def prepare_data(cfg, accelerator, output_dir) -> DataLoader:
     dist.barrier()
     return vla_train_dataloader
 
+def prepare_validation_data(
+    cfg,
+    accelerator,
+) -> DataLoader:
+    """Prepare independent VLA validation data."""
+
+    if isinstance(cfg, AccessTrackedConfig):
+        raw_cfg = cfg.unwrap()
+    else:
+        raw_cfg = cfg
+
+    val_cfg = OmegaConf.create(
+        OmegaConf.to_container(
+            raw_cfg,
+            resolve=True,
+        )
+    )
+
+    val_cfg.datasets.vla_data.data_mix = str(
+        cfg.datasets.vla_data.val_data_mix
+    )
+    val_cfg.datasets.vla_data.per_device_batch_size = int(
+        getattr(
+            cfg.datasets.vla_data,
+            "val_per_device_batch_size",
+            1,
+        )
+    )
+
+    logger.info(
+        "Creating VLA Validation Dataset with Mixture "
+        f"`{val_cfg.datasets.vla_data.data_mix}`"
+    )
+
+    val_dataloader = build_dataloader(
+        cfg=val_cfg,
+        dataset_py=val_cfg.datasets.vla_data.dataset_py,
+    )
+
+    accelerator.dataloader_config.dispatch_batches = False
+
+    if dist.is_initialized():
+        dist.barrier()
+
+    return val_dataloader
+
 
 def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
     """Set optimizer and scheduler."""
@@ -105,10 +164,20 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
 
 
 class VLATrainer(TrainerUtils):
-    def __init__(self, cfg, model, vla_train_dataloader, optimizer, lr_scheduler, accelerator):
+    def __init__(
+        self,
+        cfg,
+        model,
+        vla_train_dataloader,
+        vla_val_dataloader,
+        optimizer,
+        lr_scheduler,
+        accelerator,
+    ):
         self.config = cfg
         self.model = model
         self.vla_train_dataloader = vla_train_dataloader
+        self.vla_val_dataloader = vla_val_dataloader
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.accelerator = accelerator
@@ -142,6 +211,12 @@ class VLATrainer(TrainerUtils):
             self.model,
             self.optimizer,
             self.vla_train_dataloader,
+        )
+
+        self.vla_val_dataloader = (
+            self.accelerator.prepare_data_loader(
+                self.vla_val_dataloader
+            )
         )
 
         self._init_wandb()
@@ -263,15 +338,45 @@ class VLATrainer(TrainerUtils):
         self.accelerator.wait_for_everyone()
 
     def _log_metrics(self, metrics):
-        """Record training metrics."""
-        if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
+        """Record training metrics only after a real optimizer step."""
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+
+        if (
+            self.accelerator.sync_gradients
+            and self.completed_steps > 0
+            and self.completed_steps
+            % self.config.trainer.logging_frequency
+            == 0
+            and rank == 0
+        ):
             last_lrs = self.lr_scheduler.get_last_lr()
+
             for i, group in enumerate(self.optimizer.param_groups):
                 group_name = group.get("name", str(i))
-                metrics[f"learning_rate/{group_name}"] = last_lrs[i] if i < len(last_lrs) else last_lrs[-1]
-            metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
-            wandb.log(metrics, step=self.completed_steps)
-            logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
+                metrics[f"learning_rate/{group_name}"] = (
+                    last_lrs[i]
+                    if i < len(last_lrs)
+                    else last_lrs[-1]
+                )
+
+            metrics["epoch"] = round(
+                (
+                    self.completed_steps
+                    * self.total_batch_size
+                )
+                / len(self.vla_train_dataloader),
+                2,
+            )
+
+            wandb.log(
+                metrics,
+                step=self.completed_steps,
+            )
+
+            logger.info(
+                f"Step {self.completed_steps}, Loss: {metrics}"
+            )
 
     def _create_data_iterators(self):
         """Create data iterators."""
@@ -322,8 +427,16 @@ class VLATrainer(TrainerUtils):
                     }
                 )
 
-            if self.completed_steps % self.config.trainer.eval_interval == 0:
-                step_metrics = self.eval_action_model(step_metrics)
+            if (
+                self.accelerator.sync_gradients
+                and self.completed_steps > 0
+                and self.completed_steps
+                % self.config.trainer.eval_interval
+                == 0
+            ):
+                step_metrics = self.eval_action_model(
+                    step_metrics
+                )
 
             step_metrics["timing/data"] = t_end_data - t_start_data
             step_metrics["timing/model"] = t_end_model - t_start_model
@@ -337,23 +450,153 @@ class VLATrainer(TrainerUtils):
 
         self._finalize_training()
 
-    def eval_action_model(self, step_metrics: dict = None) -> float:
-        """Run simple action-eval on current batch and attach score to metrics."""
-        examples = self._get_next_batch()
-        actions = [example["action"] for example in examples]
-        output_dict = self.accelerator.unwrap_model(self.model).predict_action(
-            examples=examples, use_ddim=True, num_ddim_steps=20
+    @torch.no_grad()
+    def eval_action_model(
+        self,
+        step_metrics: dict = None,
+    ) -> dict:
+        """Evaluate Flow-Matching action loss on validation data."""
+
+        if step_metrics is None:
+            step_metrics = {}
+
+        was_training = self.model.training
+        self.model.eval()
+
+        eval_batches = int(
+            getattr(
+                self.config.trainer,
+                "eval_batches",
+                50,
+            )
+        )
+
+        gathered_action_losses = []
+        gathered_action_dit_losses = []
+        gathered_geometry_losses = []
+        gathered_control_losses = []
+
+        cuda_devices = (
+            [torch.cuda.current_device()]
+            if torch.cuda.is_available()
+            else []
+        )
+
+        # 固定 validation 的隨機 noise 與 diffusion timestep，
+        # 否則每次 validation loss 會因隨機採樣而不易比較。
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(12345)
+
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(12345)
+
+            for batch_index, batch_vla in enumerate(
+                self.vla_val_dataloader
+            ):
+                if batch_index >= eval_batches:
+                    break
+
+                with torch.autocast(
+                    "cuda",
+                    dtype=torch.bfloat16,
+                ):
+                    output_dict = self.model.forward(
+                        batch_vla
+                    )
+
+                    val_action_loss = output_dict["action_loss"]
+                    val_action_dit_loss = output_dict["action_dit_loss"]
+                    val_geometry_loss = output_dict["geometry_loss"]
+                    val_control_loss = output_dict["control_loss"]
+
+                gathered_action_loss = (
+                    self.accelerator.gather_for_metrics(
+                        val_action_loss.detach().float().reshape(1)
+                    )
+                )
+
+                gathered_action_dit_loss = (
+                    self.accelerator.gather_for_metrics(
+                        val_action_dit_loss.detach().float().reshape(1)
+                    )
+                )
+
+                gathered_geometry_loss = (
+                    self.accelerator.gather_for_metrics(
+                        val_geometry_loss.detach().float().reshape(1)
+                    )
+                )
+
+                gathered_control_loss = (
+                    self.accelerator.gather_for_metrics(
+                        val_control_loss.detach().float().reshape(1)
+                    )
+                )
+
+                gathered_action_losses.append(
+                    gathered_action_loss.cpu()
+                )
+
+                gathered_action_dit_losses.append(
+                    gathered_action_dit_loss.cpu()
+                )
+
+                gathered_geometry_losses.append(
+                    gathered_geometry_loss.cpu()
+                )
+
+                gathered_control_losses.append(
+                    gathered_control_loss.cpu()
+                )
+
+        if was_training:
+            self.model.train()
+
+        if not gathered_action_losses:
+            logger.warning(
+                "Validation dataloader produced no batches."
+            )
+            return step_metrics
+
+        val_action_loss = (
+            torch.cat(gathered_action_losses)
+            .mean()
+            .item()
+        )
+
+        val_action_dit_loss = (
+            torch.cat(gathered_action_dit_losses)
+            .mean()
+            .item()
+        )
+
+        val_geometry_loss = (
+            torch.cat(gathered_geometry_losses)
+            .mean()
+            .item()
+        )
+
+        val_control_loss = (
+            torch.cat(gathered_control_losses)
+            .mean()
+            .item()
         )
 
         if self.accelerator.is_main_process:
-            normalized_actions = output_dict["normalized_actions"]
-            actions = np.array(actions)
-            num_pots = np.prod(actions.shape)
-            score = TrainerUtils.euclidean_distance(normalized_actions, actions)
-            step_metrics["mse_score"] = score / num_pots
+            step_metrics["val_action_loss"] = val_action_loss
+            step_metrics["val_action_dit_loss"] = val_action_dit_loss
+            step_metrics["val_geometry_loss"] = val_geometry_loss
+            step_metrics["val_control_loss"] = val_control_loss
 
-        del examples
-        dist.barrier()
+            logger.info(
+                f"Step {self.completed_steps}, "
+                f"Validation losses: "
+                f"total={val_action_loss:.6f}, "
+                f"flow={val_action_dit_loss:.6f}, "
+                f"geometry={val_geometry_loss:.6f}, "
+                f"control={val_control_loss:.6f}"
+            )
+
         return step_metrics
 
     def _log_training_config(self):
@@ -390,7 +633,10 @@ class VLATrainer(TrainerUtils):
                 self.lr_scheduler.step()
 
         return {
-            "action_dit_loss": action_loss.item(),
+            "action_loss": output_dict["action_loss"].item(),
+            "action_dit_loss": output_dict["action_dit_loss"].item(),
+            "geometry_loss": output_dict["geometry_loss"].item(),
+            "control_loss": output_dict["control_loss"].item(),
         }
 
     def _finalize_training(self):
@@ -425,17 +671,21 @@ def main(cfg) -> None:
     output_dir = setup_directories(cfg=cfg)
     vla = build_framework(cfg)
     vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
+    vla_val_dataloader = prepare_validation_data(
+        cfg=cfg,
+        accelerator=accelerator,
+    )
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
 
     trainer = VLATrainer(
         cfg=cfg,
         model=vla,
         vla_train_dataloader=vla_train_dataloader,
+        vla_val_dataloader=vla_val_dataloader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         accelerator=accelerator,
     )
-
     trainer.prepare_training()
     trainer.train()
 

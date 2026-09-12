@@ -22,6 +22,7 @@ Exposed API:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -51,6 +52,34 @@ class PolicyServerWrapper:
             framework = framework.to(torch.bfloat16)
         framework = framework.to(device).eval()
         self._framework = framework
+        # -----------------------------------------------------
+        # Optional VLM grounding debug
+        # -----------------------------------------------------
+        self._vlm_debug_enabled = (
+            os.environ.get(
+                "STARVLA_VLM_DEBUG",
+                "0",
+            ) == "1"
+        )
+
+        self._vlm_debug_every = max(
+            1,
+            int(
+                os.environ.get(
+                    "STARVLA_VLM_DEBUG_EVERY",
+                    "3",
+                )
+            ),
+        )
+
+        self._vlm_debug_counter = 0
+        self._last_vlm_debug = None
+
+        logging.info(
+            "VLM grounding debug: enabled=%s, every=%d",
+            self._vlm_debug_enabled,
+            self._vlm_debug_every,
+        )
 
         # Co-located metadata.
         model_cfg, _ = read_mode_config(self._ckpt_path)
@@ -152,11 +181,57 @@ class PolicyServerWrapper:
                 )
         proc = self._get_processor(effective_key)
 
-        out = self._framework.predict_action(examples=examples, **kwargs)
-        normalized = np.asarray(out["normalized_actions"])  # (B, T, D)
+        out = self._framework.predict_action(
+            examples=examples,
+            **kwargs,
+        )
+
+        normalized = np.asarray(
+            out["normalized_actions"]
+        )
 
         unnorm = np.stack(
-            [proc.unapply_actions(normalized[b]) for b in range(normalized.shape[0])],
+            [
+                proc.unapply_actions(normalized[b])
+                for b in range(normalized.shape[0])
+            ],
             axis=0,
         )
-        return {"actions": unnorm}
+
+        result = {
+            "actions": unnorm,
+
+            # V4E diagnostic:
+            # exact DiT output before un-normalization
+            "normalized_actions": normalized,
+        }
+
+        # =====================================================
+        # VLM grounding debug - not every inference
+        # =====================================================
+        self._vlm_debug_counter += 1
+
+        if hasattr(self._framework, "predict_grounding"):
+
+            if (
+                self._last_vlm_debug is None
+                or self._vlm_debug_counter % 3 == 0
+            ):
+                try:
+                    self._last_vlm_debug = (
+                        self._framework.predict_grounding(
+                            examples=examples,
+                            max_new_tokens=64,
+                        )
+                    )
+
+                except Exception as error:
+                    logging.warning(
+                        "VLM grounding debug failed: %r",
+                        error,
+                    )
+
+            if self._last_vlm_debug is not None:
+                result["vlm_debug"] = self._last_vlm_debug
+
+        return result

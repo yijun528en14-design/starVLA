@@ -1,0 +1,93 @@
+run_id: ur5_front_rgbd_pick_600_geometry_v8
+run_root_dir: ./playground/Checkpoints
+seed: 42
+wandb_entity: null
+wandb_project: starvla_ur5
+is_debug: false
+version_id: "0.21"
+
+framework:
+  name: QwenGR00T
+
+  camera_context:
+    enabled: true
+    calibration_path: /home/lin-yijun/vla_workspace/starVLA/examples/UR5/calibration/sim_camera_calibration_summary.json
+
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/Qwen3-VL-4B-Instruct
+    attn_implementation: sdpa
+    vl_hidden_dim: 2048
+    
+    lora:
+      enabled: false
+      r: 8
+      lora_alpha: 16
+      lora_dropout: 0.05
+      target_modules:
+        - q_proj
+        - v_proj
+      gradient_checkpointing: true
+      
+  action_model:
+    action_model_type: DiT-B
+    hidden_size: 1024
+    action_dim: 7
+    state_dim: 7
+
+    geometry_dim: 3
+    geometry_loss_weight: 0.0
+    control_loss_weight: 0.3
+    metric_loss_weight: 0.0
+    metric_delta_m: 0.01
+
+
+    action_horizon: 8
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    include_state: true
+    data_root_dir: /home/lin-yijun/ros_ur_driver/dataset_VLA_sim/starvla_ur5_front_rgbd_pick_600_geometry_v8
+    data_mix: ur5_front_rgbd_pick_train
+    val_data_mix: ur5_front_rgbd_pick_val
+    val_per_device_batch_size: 1
+    action_type: delta_pose
+    sequential_step_sampling: false
+    CoT_prompt: "Your task is {instruction}."
+    per_device_batch_size: 1
+    load_all_data_for_training: true
+    video_backend: torchvision_av
+
+trainer:
+  # Load the complete released Qwen3VL-GR00T Bridge checkpoint, then adapt its
+  # action head to UR5 while the VLM is frozen for the first baseline.
+  pretrained_checkpoint: ./playground/Pretrained_models/StarVLA/Qwen3VL-GR00T-Bridge-RT-1/checkpoints/steps_20000_pytorch_model.pt
+  reload_modules: "action_model"
+  is_resume: false
+  max_train_steps: 2000
+  num_warmup_steps: 100
+  save_interval: 250
+  eval_interval: 100
+  eval_batches: 50
+  learning_rate:
+    base: 1.0e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 5.0e-05
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  freeze_modules: 'qwen_vl_interface'
+  loss_scale:
+    vla: 1.0
+  max_grad_norm: 1.0
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: true
+  save_format: pt
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08

@@ -1,0 +1,203 @@
+{
+  "frames": {
+    "world_frame": "world",
+    "base_frame": "base_link",
+    "eef_frame": "tool0",
+    "static_camera_message_frame": "static_camera/static_camera_link/static_rgbd_camera",
+    "static_camera_tf_note": "Static camera message frame is not currently present in the ROS TF tree; extrinsic below is derived from SDF pose and world->base_link.",
+    "eih_camera_link_frame": "eih_camera_link",
+    "eih_camera_message_frame": "ur/hex_e_base_link/eih_rgbd_camera",
+    "eih_camera_message_frame_note": "CameraInfo frame_id differs from the TF link name. T_tool0_camera_link below is measured from TF."
+  },
+  "static_camera": {
+    "topics": {
+      "rgb": "/camera/image",
+      "depth": "/camera/depth_image",
+      "camera_info": "/camera/camera_info"
+    },
+    "intrinsics": {
+      "width": 1280,
+      "height": 960,
+      "distortion_model": "plumb_bob",
+      "fx": 1227.900817840585,
+      "fy": 1227.900817840585,
+      "cx": 640.0,
+      "cy": 480.0,
+      "camera_matrix": [
+        [
+          1227.900817840585,
+          0.0,
+          640.0
+        ],
+        [
+          0.0,
+          1227.900817840585,
+          480.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "dist_coeffs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "horizontal_fov_rad": 0.96095
+    },
+    "extrinsics": {
+      "source": "Verified SDF/Gazebo static_camera pose + runtime world->base_link TF",
+      "T_world_base_link": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.35
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "static_camera_pose_in_world_xyz_rpy": [
+        1.1,
+        0.0,
+        1.1,
+        0.0,
+        0.9,
+        3.141592653589793
+      ],
+      "T_base_camera_link": [
+        [
+          -0.6216099682706644,
+          -1.2246467991473532e-16,
+          -0.7833269096274834,
+          1.1
+        ],
+        [
+          7.61252657960757e-17,
+          -1.0,
+          9.592987925612856e-17,
+          0.0
+        ],
+        [
+          -0.7833269096274834,
+          0.0,
+          0.6216099682706644,
+          0.7500000000000001
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  },
+  "eye_in_hand_camera": {
+    "topics": {
+      "rgb": "/eih_camera/image",
+      "depth": "/eih_camera/depth_image",
+      "camera_info": "/eih_camera/camera_info"
+    },
+    "intrinsics": {
+      "width": 1280,
+      "height": 960,
+      "distortion_model": "plumb_bob",
+      "fx": 935.4854061299854,
+      "fy": 935.4854061299853,
+      "cx": 640.0,
+      "cy": 480.0,
+      "camera_matrix": [
+        [
+          935.4854061299854,
+          0.0,
+          640.0
+        ],
+        [
+          0.0,
+          935.4854061299853,
+          480.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "dist_coeffs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "horizontal_fov_rad": 1.2
+    },
+    "extrinsics": {
+      "source": "runtime tf2_echo tool0 -> eih_camera_link",
+      "translation_tool0_to_camera_link": [
+        0.105,
+        0.0,
+        0.159
+      ],
+      "quaternion_xyzw_tool0_to_camera_link": [
+        0.0,
+        0.917,
+        0.0,
+        -0.399
+      ],
+      "rpy_rad_tool0_to_camera_link": [
+        3.141592653589793,
+        -0.821,
+        -3.141592653589793
+      ],
+      "T_tool0_camera_link": [
+        [
+          -0.682,
+          0.0,
+          -0.732,
+          0.105
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.732,
+          0.0,
+          -0.682,
+          0.159
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  },
+  "important_note": "Updated calibration: static-camera extrinsics now match the actual Gazebo/SDF pose [1.10, 0.0, 1.10, 0.0, 0.90, pi]. Eye-in-hand intrinsics were updated from runtime /eih_camera/camera_info for horizontal_fov=1.2 (fx=935.4854061299854, fy=935.4854061299853). Eye-in-hand T_tool0_camera_link is unchanged because runtime tf2_echo matches the stored transform."
+}
